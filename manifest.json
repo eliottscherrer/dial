@@ -1,0 +1,23 @@
+{
+  "name": "Dial",
+  "description": "change how fast your music plays, and let the pitch follow or stay put",
+  "main": "dist/dial.js",
+  "readme": "MARKETPLACE.md",
+  "authors": [
+    {
+      "name": "eliottscherrer",
+      "url": "https://github.com/eliottscherrer"
+    }
+  ],
+  "tags": [
+    "playback speed",
+    "speed",
+    "slowed",
+    "sped up",
+    "nightcore",
+    "pitch",
+    "tempo",
+    "audio"
+  ],
+  "preview": "assets/preview-card.jpg"
+}

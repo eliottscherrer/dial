@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><defs>
+<radialGradient id="a" cx="22%" cy="85%" r="75%"><stop offset="0" stop-color="#ff1f8e" stop-opacity=".75"/><stop offset="1" stop-color="#ff1f8e" stop-opacity="0"/></radialGradient>
+<radialGradient id="b" cx="85%" cy="12%" r="70%"><stop offset="0" stop-color="#4b34ff" stop-opacity=".8"/><stop offset="1" stop-color="#4b34ff" stop-opacity="0"/></radialGradient>
+<linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".3"/><stop offset="1" stop-color="#fff" stop-opacity=".04"/></linearGradient></defs>
+<rect width="256" height="256" rx="58" fill="#120c1c"/><rect width="256" height="256" rx="58" fill="url(#a)"/><rect width="256" height="256" rx="58" fill="url(#b)"/>
+<rect x=".75" y=".75" width="254.5" height="254.5" rx="57.5" fill="none" stroke="url(#rim)" stroke-width="1.5"/>
+<g transform="translate(53.60 56.70) scale(6.2)" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3.34 19a10 10 0 1 1 17.32 0" stroke="#f4f7f9" stroke-width="2"/><path d="M12.355 14.924L10.226 9.379" stroke="#f4f7f9" stroke-width="2"/></g></svg>
