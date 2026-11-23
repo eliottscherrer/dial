@@ -1,5 +1,11 @@
 # changelog
 
+## 0.1.3
+
+- pitch now has its own slider in advanced options, so you can move it up or down by up to 12 semitones at any speed, 1x included ([#1](https://github.com/eliottscherrer/dial/issues/1)). it can sound a bit muffled because Spotify's engine has to time stretch the song to do it, and the reset button next to it puts the pitch back on the speed
+- skipping past the last track of a playlist now lands on its first track like Spotify does, instead of a random track from Dial's queue, and pressing play there keeps your speed
+- the reset at the top of the panel is an icon now
+
 ## 0.1.2
 
 - fixed the client freezing when you hover a time label while a speed other than 1x is set

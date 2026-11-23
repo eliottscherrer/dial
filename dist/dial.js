@@ -9,6 +9,7 @@
   var PITCH_KEY = "audio.pitch_factor";
   var MIN_RATE = 0.5;
   var MAX_RATE = 1.5;
+  var MAX_SEMITONES = 12;
   var QUEUE_DEPTH = 80;
   var NEAR_START_MS = 2e3;
   var END_WINDOW_MS = 8e3;
@@ -68,8 +69,8 @@
     const md = api()?.getState?.()?.item?.metadata;
     return md?.[SPEED_KEY] != null || md?.[PITCH_KEY] != null;
   }
-  function currentPitchLinked() {
-    return api()?.getState?.()?.item?.metadata?.[PITCH_KEY] != null;
+  function currentPitchKey() {
+    return api()?.getState?.()?.item?.metadata?.[PITCH_KEY] ?? null;
   }
 
   var DBG = window.DialDebug ?? (window.DialDebug = {});
@@ -78,9 +79,26 @@
     rate: 1,
     timeline: "real",
     pitch: true,
+    semitones: 0,
     presets: [PRESETS[0]?.rate ?? 0.85, 1, PRESETS[2]?.rate ?? 1.25],
     presetNames: PRESETS.map((p) => p.name)
   };
+  var clampSemitones = (v) => {
+    const stepped = Math.round(v * 10) / 10;
+    return Math.min(MAX_SEMITONES, Math.max(-MAX_SEMITONES, stepped)) + 0;
+  };
+  var isNeutral = () => state.rate === 1 && (state.pitch || state.semitones === 0);
+  var shiftAt = (rate) => state.pitch ? 12 * Math.log2(rate) : state.semitones;
+  function wantedKeys() {
+    if (isNeutral())
+      return {};
+    const keys = { [SPEED_KEY]: String(state.rate) };
+    if (state.pitch)
+      keys[PITCH_KEY] = String(state.rate);
+    else if (state.semitones !== 0)
+      keys[PITCH_KEY] = (2 ** (state.semitones / 12)).toFixed(4);
+    return keys;
+  }
   var loadPresets = (saved) => {
     if (!Array.isArray(saved) || saved.length !== 3)
       return;
@@ -109,6 +127,9 @@
       }
       if (typeof saved.pitch === "boolean")
         state.pitch = saved.pitch;
+      if (typeof saved.semitones === "number" && Number.isFinite(saved.semitones)) {
+        state.semitones = clampSemitones(saved.semitones);
+      }
       loadPresets(saved.presets);
       loadNames(saved.presetNames);
     } catch (e) {
@@ -160,7 +181,7 @@
   var PROBE_DELAYS_MS = [600, 2400, 3e3];
   var probeRun = 0;
   async function probeSupport() {
-    if (state.rate === 1)
+    if (isNeutral())
       return;
     const run = ++probeRun;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -170,7 +191,7 @@
         return;
       const md = api()?.getState?.()?.item?.metadata ?? {};
       const sawSpeed = md[SPEED_KEY] != null;
-      const sawPitch2 = state.pitch ? md[PITCH_KEY] != null : support.pitch;
+      const sawPitch2 = wantedKeys()[PITCH_KEY] != null ? md[PITCH_KEY] != null : support.pitch;
       if (sawSpeed) {
         if (sawSpeed === support.speed && sawPitch2 === support.pitch)
           return;
@@ -181,7 +202,7 @@
         return;
       }
     }
-    const sawPitch = state.pitch ? false : support.pitch;
+    const sawPitch = wantedKeys()[PITCH_KEY] != null ? false : support.pitch;
     if (support.speed === false && sawPitch === support.pitch)
       return;
     support.speed = false;
@@ -192,10 +213,11 @@
 
   var real = null;
   var tail = null;
+  var wraps = false;
   var SAVE_KEY = "dial:context";
   var persist = () => {
     try {
-      Spicetify.LocalStorage.set(SAVE_KEY, JSON.stringify({ real, tail }));
+      Spicetify.LocalStorage.set(SAVE_KEY, JSON.stringify({ real, tail, wraps }));
     } catch {
     }
   };
@@ -205,6 +227,7 @@
       if (saved && stillOurs) {
         real = saved.real ?? null;
         tail = saved.tail ?? null;
+        wraps = !!saved.wraps;
       }
     } catch {
     }
@@ -216,8 +239,10 @@
     persist();
   };
   var getTail = () => tail;
-  var rememberTail = (uri) => {
+  var tailWraps = () => wraps;
+  var rememberTail = (uri, wrapsToStart = false) => {
     tail = uri;
+    wraps = wrapsToStart;
     persist();
   };
   var played = [];
@@ -257,6 +282,13 @@
       return null;
     }
   }
+  var firstRow = (contextUri) => {
+    if (!contextUri)
+      return null;
+    if (contextUri === "spotify:collection:liked-songs")
+      return likedRows?.[0] ?? null;
+    return rowsCache.get(contextUri)?.[0] ?? null;
+  };
   async function rowsBefore(contextUri, trackUri) {
     if (!contextUri)
       return null;
@@ -340,7 +372,7 @@
       if (kind !== "track")
         return;
       const carries = item.metadata?.[SPEED_KEY] != null || item.metadata?.[PITCH_KEY] != null;
-      if (state.rate === 1 && !carries && !getRealContext())
+      if (isNeutral() && !carries && !getRealContext())
         return;
       const ctx = st.context;
       if (ctx?.uri && !isOwnContext(ctx.uri)) {
@@ -348,18 +380,19 @@
       }
       observeShuffle(st);
       const position = Math.round(Spicetify.Player.getProgress());
-      const metadata = state.rate === 1 ? {} : {
-        [SPEED_KEY]: String(state.rate),
-        ...state.pitch ? { [PITCH_KEY]: String(state.rate) } : {}
-      };
+      const metadata = wantedKeys();
       const upcoming = (st.nextItems ?? []).slice(0, DBG.queueDepth ?? QUEUE_DEPTH).filter((n) => n?.uri);
-      const nextUris = upcoming.map((n) => n.uri);
       const contextRows = shuffleWanted() ? null : await rowsBefore(st.context?.uri, item.uri);
+      const first = firstRow(st.context?.uri);
+      const wraps2 = !!first && first !== item.uri && (!upcoming.length || tailWraps() && upcoming.length === 1 && upcoming[0].uri === first);
+      if (wraps2 && !upcoming.length)
+        upcoming.push({ uri: first });
+      const nextUris = upcoming.map((n) => n.uri);
       const history = (contextRows ?? playedBefore(item.uri)).filter((uri) => !nextUris.includes(uri)).map((uri) => ({ uri, metadata }));
       const withSpeed = (it) => ({ uri: it.uri, uid: it.uid, metadata });
       const items = [...history, withSpeed(item), ...upcoming.map(withSpeed)];
       const real2 = getRealContext();
-      if (state.rate === 1 && real2) {
+      if (isNeutral() && real2) {
         await restoreShuffle(real2.uri);
         await playRaw(
           P,
@@ -378,7 +411,7 @@
         console.log(LOG, "restored playback to its original context");
         return;
       }
-      rememberTail(items[items.length - 1]?.uri ?? null);
+      rememberTail(items[items.length - 1]?.uri ?? null, wraps2);
       await playRaw(
         P,
         { uri: item.uri, pages: [{ items }] },
@@ -386,7 +419,7 @@
         {
           skipTo: { uri: item.uri },
           seekTo: position > NEAR_START_MS ? position : void 0,
-          shuffle: state.rate === 1 ? shuffleWanted() : false,
+          shuffle: isNeutral() ? shuffleWanted() : false,
           repeat: st.repeat,
           paused
         }
@@ -415,6 +448,7 @@
     const item = st?.item;
     if (!P || !st || !item?.uri || !real2)
       return;
+    const wrapped = tailWraps();
     try {
       await restoreShuffle(real2.uri);
       await playRaw(
@@ -425,12 +459,18 @@
           skipTo: { uri: item.uri },
           shuffle: shuffleWanted(),
           repeat: st.repeat,
-          paused: st.isPaused
+          paused: st.isPaused || wrapped
         }
       );
       rememberTail(null);
       rememberContext(null);
       console.log(LOG, "relayed playback back to its original context at the page boundary");
+      if (wrapped) {
+        for (let i = 0; i < 40 && !P.getState?.()?.nextItems?.length; i++) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        await applySpeed();
+      }
     } catch (e) {
       console.warn(LOG, "relay failed; staying inside the carried page", e);
     }
@@ -465,7 +505,7 @@
     originalPlay = original;
     P.play = async function(context, origin, options) {
       const ours = isOwnContext(context?.uri) && Array.isArray(context?.pages);
-      if (state.rate === 1 || ours || support.speed === false || DBG.noApply || starting) {
+      if (isNeutral() || ours || support.speed === false || DBG.noApply || starting) {
         return original.call(this, context, origin, options);
       }
       const wantPaused = !!options?.paused;
@@ -499,7 +539,7 @@
   }
   function setRate(v) {
     state.rate = clamp(Math.round(v * 100) / 100);
-    if (state.rate === 1 && (support.speed === false || support.pitch === false)) {
+    if (isNeutral() && (support.speed === false || support.pitch === false)) {
       support.speed = null;
       support.pitch = null;
     }
@@ -511,6 +551,12 @@
     save();
     emitChange();
     applySpeedSoon(0);
+  }
+  function setSemitones(v) {
+    state.semitones = clampSemitones(v);
+    state.pitch = false;
+    save();
+    emitChange();
   }
   async function setTimeline(id) {
     if (!TIMELINES.some((t) => t.id === id))
@@ -1170,12 +1216,14 @@
     rest: 45
   };
   var CHEVRON_ICON = '<svg class="dial-chev" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+  var RESET_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>';
   var WARN_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>';
 
   var panelMarkup = () => `
   <div class="dial-head">
     <span class="dial-title">Playback speed</span>
-    <button class="dial-reset" type="button">Reset</button>
+    <button class="dial-reset" type="button" aria-label="Reset speed and pitch"
+            data-tip="puts the speed back to 1x and the pitch back to the original">${RESET_ICON}</button>
   </div>
   <div class="dial-readout">
     <span class="dial-counter"></span><span class="dial-x">&times;</span>
@@ -1194,8 +1242,19 @@
   </button>
   <div class="dial-adv">
     <div class="dial-adv-inner">
-      <div class="dial-sub">Pitch</div>
-      <div class="dial-pitch-host"></div>
+      <div class="dial-sub dial-pitch-head">
+        <span>Pitch</span>
+        <span class="dial-pitch-value">Follows speed</span>
+      </div>
+      <div class="dial-pitch-row">
+        <div class="dial-slider-wrap dial-pitch-slider" tabindex="0" role="slider"
+             aria-label="Pitch in semitones" aria-valuemin="${-MAX_SEMITONES}" aria-valuemax="${MAX_SEMITONES}">
+          <div class="dial-groove"><div class="dial-fill"></div></div>
+          <div class="dial-thumb"></div>
+        </div>
+        <button class="dial-pitch-reset" type="button" aria-label="Make the pitch follow the speed"
+                data-tip="puts the pitch back on the speed, so it moves with it again">${RESET_ICON}</button>
+      </div>
       <div class="dial-sub">Timeline</div>
       <div class="dial-timeline-host"></div>
       <div class="dial-sub">Presets</div>
@@ -1388,13 +1447,12 @@
     }
   }
 
-  function describeRate(rate, pitchFollows) {
-    if (Math.abs(rate - 1) < 5e-3)
-      return "Normal speed";
+  function describeRate(rate, semis) {
     const pct = Math.round(Math.abs(rate - 1) * 100);
-    const semis = 12 * Math.log2(rate);
-    const shift = pitchFollows ? ` ${MIDDOT} ${semis > 0 ? "+" : "\u2212"}${Math.abs(semis).toFixed(1)} st` : "";
-    return `${pct}% ${rate < 1 ? "slower" : "faster"}${shift}`;
+    const speed = Math.abs(rate - 1) < 5e-3 ? "Normal speed" : `${pct}% ${rate < 1 ? "slower" : "faster"}`;
+    if (Math.abs(semis) < 0.05)
+      return speed;
+    return `${speed} ${MIDDOT} ${semis > 0 ? "+" : "\u2212"}${Math.abs(semis).toFixed(1)} st`;
   }
   function createNote(wrap, text) {
     text.textContent = "Normal speed";
@@ -1415,8 +1473,8 @@
       reveal(shown) {
         spring.set(shown ? 1 : 0);
       },
-      set(rate, pitchFollows) {
-        const next = describeRate(rate, pitchFollows);
+      set(rate, semis) {
+        const next = describeRate(rate, semis);
         if (next === last2 || DBG.noNote)
           return;
         const write = () => {
@@ -1613,23 +1671,41 @@
     };
   }
 
-  function snapToDetent(v) {
-    for (const p of state.presets)
-      if (Math.abs(v - p) <= DETENT)
+  var RATE_SCALE = {
+    min: MIN_RATE,
+    max: MAX_RATE,
+    initial: 1,
+    detents: () => state.presets,
+    magnet: MAGNET,
+    detent: DETENT,
+    perUnit: 100,
+    keyStep: 0.01,
+    keyStepLarge: 0.1
+  };
+  function snapToDetent(v, points = state.presets, radius = DETENT) {
+    for (const p of points)
+      if (Math.abs(v - p) <= radius)
         return p;
     return v;
   }
-  function magnetize(v) {
+  function magnetize(v, points = state.presets, radius = MAGNET) {
     if (DBG.noMagnet)
       return v;
-    for (const p of state.presets) {
+    for (const p of points) {
       const d = v - p;
-      if (Math.abs(d) < MAGNET)
-        return p + d * Math.abs(d) / MAGNET;
+      if (Math.abs(d) < radius)
+        return p + d * Math.abs(d) / radius;
     }
     return v;
   }
-  function createSlider({ wrap, onInput, onCommit, onFrame, onScrub }) {
+  function createSlider({
+    wrap,
+    scale = RATE_SCALE,
+    onInput,
+    onCommit,
+    onFrame,
+    onScrub
+  }) {
     const groove = wrap.querySelector(".dial-groove");
     const fill = wrap.querySelector(".dial-fill");
     const thumb = wrap.querySelector(".dial-thumb");
@@ -1644,7 +1720,7 @@
     function paint() {
       if (!width || DBG.noSliderPaint)
         return;
-      const t = (rate.value - MIN_RATE) / (MAX_RATE - MIN_RATE);
+      const t = (rate.value - scale.min) / (scale.max - scale.min);
       const over = overflow.value;
       const grab = grabbed.value;
       if (!DBG.noGrooveLayout) {
@@ -1656,20 +1732,26 @@
       }
       const grooveW = width + Math.abs(over);
       const edge = 8 + (width - 16) * t + Math.max(0, over);
-      setFill(`translateX(${(edge - grooveW).toFixed(2)}px)`);
+      if (scale.origin === void 0) {
+        setFill(`translateX(${(edge - grooveW).toFixed(2)}px)`);
+      } else {
+        const from = 8 + (width - 16) * (scale.origin - scale.min) / (scale.max - scale.min) + Math.max(0, over);
+        const clipPath = `inset(0 ${(grooveW - Math.max(from, edge)).toFixed(2)}px 0 ${Math.min(from, edge).toFixed(2)}px)`;
+        setFill(clipPath, { clipPath });
+      }
       setThumb(
         `translateX(${((width - 16) * t + over).toFixed(2)}px) scale(${(1 + grab * 0.12).toFixed(3)})`
       );
       onFrame(rate.value);
     }
     const mark = () => engine.mark(paint);
-    const rate = createSpring({ value: 1, ...SPRING.rate, onUpdate: mark });
+    const rate = createSpring({ value: scale.initial, ...SPRING.rate, onUpdate: mark });
     const overflow = createSpring({ value: 0, ...SPRING.over, onUpdate: mark });
     const grabbed = createSpring({ value: 0, ...SPRING.grab, onUpdate: mark });
     const rateFromPointer = (clientX) => {
       const r = dragRect ?? wrap.getBoundingClientRect();
       const t = (clientX - r.left - 8) / (r.width - 16);
-      return MIN_RATE + Math.min(1, Math.max(0, t)) * (MAX_RATE - MIN_RATE);
+      return scale.min + Math.min(1, Math.max(0, t)) * (scale.max - scale.min);
     };
     const overflowFromPointer = (clientX) => {
       const r = dragRect ?? wrap.getBoundingClientRect();
@@ -1681,9 +1763,11 @@
     };
     let moveX = 0;
     let moveFrame = null;
+    let target = scale.initial;
     const processMove = () => {
       moveFrame = null;
-      onInput(magnetize(rateFromPointer(moveX)));
+      target = magnetize(rateFromPointer(moveX), scale.detents(), scale.magnet);
+      onInput(target);
       overflow.set(overflowFromPointer(moveX));
     };
     wrap.addEventListener("pointerdown", (e) => {
@@ -1716,12 +1800,13 @@
         cancelAnimationFrame(moveFrame);
         moveFrame = null;
       }
+      target = magnetize(rateFromPointer(moveX), scale.detents(), scale.magnet);
       dragRect = null;
       wrap.classList.remove("is-dragging");
       onScrub(false);
       grabbed.set(hovering ? 1 : 0);
       overflow.set(0);
-      onInput(snapToDetent(Math.round(rate.value * 100) / 100));
+      onInput(snapToDetent(Math.round(target * scale.perUnit) / scale.perUnit, scale.detents(), scale.detent));
       onCommit();
     };
     wrap.addEventListener("pointerup", endDrag);
@@ -1736,7 +1821,7 @@
         grabbed.set(0);
     });
     wrap.addEventListener("keydown", (e) => {
-      const by = e.shiftKey ? 0.1 : 0.01;
+      const by = e.shiftKey ? scale.keyStepLarge : scale.keyStep;
       if (e.key === "ArrowLeft" || e.key === "ArrowDown")
         onInput(rate.value - by);
       else if (e.key === "ArrowRight" || e.key === "ArrowUp")
@@ -1862,6 +1947,8 @@
     };
   }
 
+  var fmtSemitones = (v) => v === 0 ? "0" : `${v > 0 ? "+" : "\u2212"}${Math.abs(v).toFixed(1)}`;
+  var SEMITONE_DETENTS = Array.from({ length: MAX_SEMITONES * 2 + 1 }, (_, i) => i - MAX_SEMITONES);
   var presetIndex = (rate) => state.presets.findIndex((p) => Math.abs(p - rate) < 5e-3);
   function createPanel() {
     const host = document.createElement("div");
@@ -1889,12 +1976,17 @@
     const advToggle = q(".dial-adv-toggle");
     const signEl = q(".dial-x");
     const sliderWrap = q(".dial-slider-wrap");
+    const pitchRow = q(".dial-pitch-row");
+    const pitchWrap = q(".dial-pitch-slider");
+    const pitchValue = q(".dial-pitch-value");
+    const pitchReset = q(".dial-pitch-reset");
     let open = false;
     let advOpen = false;
     let advHeight = 0;
     let lastNotice = null;
     let lastTimeline = null;
     let lastLabel = "";
+    let lastShift = "";
     const button = new Spicetify.Playbar.Button(
       "Playback speed",
       GAUGE_ICON,
@@ -1978,7 +2070,7 @@
       wrap: sliderWrap,
       onInput: setRate,
       onCommit: () => applySpeedSoon(),
-      onFrame: (rate) => note.set(rate, state.pitch),
+      onFrame: (rate) => note.set(rate, shiftAt(rate)),
       onScrub: (active2) => note.reveal(active2)
     });
     sliderWrap.addEventListener("pointerenter", () => note.reveal(true));
@@ -2002,25 +2094,33 @@
       onLeave: () => tooltip.hide()
     });
     const presetButtons = presetSeg.buttons();
-    const pitchSeg = createSegmented({
-      host: q(".dial-pitch-host"),
-      compact: true,
-      items: [
-        {
-          value: 1,
-          label: "Follows speed",
-          tip: "Pitch falls with the tempo, like a record slowed on the platter. The real slowed sound."
-        },
-        {
-          value: 0,
-          label: "Locked",
-          tip: "Holds the original pitch and time-stretches instead, the way podcast speed controls do."
-        }
-      ],
-      onPick: (v) => setPitch(v === 1),
-      onHover: (el) => tooltip.show(el),
-      onLeave: () => tooltip.hide()
+    const pitchSlider = createSlider({
+      wrap: pitchWrap,
+      scale: {
+        min: -MAX_SEMITONES,
+        max: MAX_SEMITONES,
+        initial: 0,
+        origin: 0,
+        detents: () => SEMITONE_DETENTS,
+        magnet: 0.3,
+        detent: 0.2,
+        perUnit: 10,
+        keyStep: 0.1,
+        keyStepLarge: 1
+      },
+      onInput: setSemitones,
+      onCommit: () => applySpeedSoon(),
+      onFrame: () => {
+      },
+      onScrub: () => {
+      }
     });
+    pitchReset.addEventListener("click", () => {
+      tooltip.hide();
+      setPitch(true);
+    });
+    pitchReset.addEventListener("pointerenter", () => tooltip.show(pitchReset));
+    pitchReset.addEventListener("pointerleave", () => tooltip.hide());
     const timelineSeg = createSegmented({
       host: q(".dial-timeline-host"),
       compact: true,
@@ -2046,9 +2146,9 @@
     });
     function measure() {
       presetSeg.measure();
-      pitchSeg.measure();
       timelineSeg.measure();
       slider.measure();
+      pitchSlider.measure();
       counter.measure();
       alignSign(pop, counterEl, signEl);
       const inner = advEl.firstElementChild;
@@ -2098,7 +2198,8 @@
         return;
       lastNotice = text;
       noticeEl.innerHTML = text ? `<div class="dial-notice-in">${WARN_ICON}<span>${text}</span></div>` : "";
-      pitchSeg.setEnabled(support.pitch !== false && getKind() === "track");
+      const pitchUsable = support.pitch !== false && getKind() === "track";
+      pitchRow.classList.toggle("is-off", !pitchUsable);
       button.element.classList.toggle("dial-unsupported", support.speed === false);
       const inner = noticeEl.firstElementChild;
       noticeH = inner ? NOTICE_GAP + inner.offsetHeight : 0;
@@ -2110,7 +2211,17 @@
       needle.set(state.rate);
       if (!DBG.noPill)
         presetSeg.set(presetIndex(state.rate));
-      pitchSeg.set(state.pitch ? 0 : 1);
+      if (advOpen)
+        pitchSlider.set(shiftAt(state.rate));
+      const pitchText = state.pitch ? "Follows speed" : state.semitones === 0 ? "Original" : `${fmtSemitones(state.semitones)} st`;
+      if (pitchText !== lastShift) {
+        lastShift = pitchText;
+        pitchValue.textContent = pitchText;
+        pitchWrap.setAttribute("aria-valuetext", pitchText);
+        pitchRow.classList.toggle("is-auto", state.pitch);
+        pitchReset.disabled = state.pitch;
+        note.set(state.rate, shiftAt(state.rate));
+      }
       if (state.timeline !== lastTimeline) {
         lastTimeline = state.timeline;
         timelineSeg.set(TIMELINES.findIndex((t) => t.id === state.timeline));
@@ -2132,9 +2243,10 @@
         presetSeg.setLabel(i, state.presetNames[i] ?? "");
       });
       drawNotice();
-      button.active = state.rate !== 1;
+      button.active = !isNeutral();
       if (!slider.dragging) {
-        const label = state.rate === 1 ? "Playback speed" : `Playback speed - ${state.rate.toFixed(2)}x`;
+        const custom = !state.pitch && state.semitones !== 0 ? `, ${fmtSemitones(state.semitones)} st` : "";
+        const label = isNeutral() ? "Playback speed" : `Playback speed - ${state.rate.toFixed(2)}x${custom}`;
         if (label !== lastLabel) {
           button.label = label;
           lastLabel = label;
@@ -2200,7 +2312,12 @@
         emitChange();
       });
     });
-    q(".dial-reset").addEventListener("click", () => {
+    const resetButton = q(".dial-reset");
+    resetButton.addEventListener("pointerenter", () => tooltip.show(resetButton));
+    resetButton.addEventListener("pointerleave", () => tooltip.hide());
+    resetButton.addEventListener("click", () => {
+      tooltip.hide();
+      state.semitones = 0;
       setRate(1);
       applySpeedSoon();
     });
@@ -2209,10 +2326,11 @@
       advToggle.classList.toggle("is-open", advOpen);
       advToggle.setAttribute("aria-expanded", String(advOpen));
       measure();
+      pitchSlider.set(shiftAt(state.rate), false);
       advSpring.set(advOpen ? 1 : 0);
       tooltip.hide();
       setTimeout(() => {
-        pitchSeg.measure();
+        pitchSlider.measure();
         timelineSeg.measure();
       }, 60);
     });
@@ -2251,6 +2369,7 @@
     slider.set(state.rate, false);
     counter.set(state.rate, false);
     needle.set(state.rate, false);
+    pitchSlider.set(shiftAt(state.rate), false);
     render();
     return api3;
   }
@@ -2281,27 +2400,32 @@
       notePlayed(uri);
       if (isStarting())
         return;
-      if (state.rate !== 1 && atRelayBoundary(data?.item?.uri)) {
+      if (!isNeutral() && atRelayBoundary(data?.item?.uri)) {
         void relayToRealContext();
         clearRanToEnd();
         return;
       }
-      if (state.rate === 1) {
+      if (isNeutral()) {
         if (carriesKeys() && mayReapply(uri))
           void applySpeed();
         clearRanToEnd();
         return;
       }
       const speedOff = Math.abs(currentSpeed() - state.rate) > 5e-3;
-      const pitchOff = currentPitchLinked() !== state.pitch;
-      const gaplessPitchLost = previousRanToEnd() && state.pitch;
+      const wantedPitch = wantedKeys()[PITCH_KEY] ?? null;
+      const pitchOff = currentPitchKey() !== wantedPitch;
+      const gaplessPitchLost = previousRanToEnd() && wantedPitch != null;
       if ((speedOff || pitchOff || gaplessPitchLost) && mayReapply(uri))
         void applySpeed();
       clearRanToEnd();
     });
-    if (carriesKeys() && Math.abs(currentSpeed() - state.rate) > 5e-3) {
-      setRate(currentSpeed());
-      state.pitch = currentPitchLinked();
+    if (carriesKeys() && (Math.abs(currentSpeed() - state.rate) > 5e-3 || currentPitchKey() !== (wantedKeys()[PITCH_KEY] ?? null))) {
+      const speed = currentSpeed();
+      const key = currentPitchKey();
+      const factor = key == null ? null : parseFloat(key);
+      state.pitch = factor != null && Math.abs(factor - speed) < 1e-4;
+      state.semitones = factor && !state.pitch ? clampSemitones(12 * Math.log2(factor)) : 0;
+      setRate(speed);
     }
     exposeApi(panel);
     console.log(LOG, "ready. Dial.setRate(0.5) to test.");
@@ -2416,7 +2540,7 @@
 }
 .dial-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 12px;
@@ -2426,19 +2550,6 @@
   line-height: 1.3;
   font-weight: 600;
   letter-spacing: -0.005em;
-  color: var(--dial-text-1);
-}
-.dial-reset {
-  border: none;
-  background: none;
-  padding: 0;
-  font-size: 0.82rem;
-  font-weight: 500;
-  color: var(--dial-text-2);
-  cursor: pointer;
-  transition: color var(--dial-fast) var(--dial-ease);
-}
-.dial-reset:hover {
   color: var(--dial-text-1);
 }
 .dial-adv-toggle {
@@ -2544,6 +2655,68 @@
 }
 .dial-step:active {
   transform: scale(0.9);
+}
+.dial-pitch-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.dial-pitch-value {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  color: var(--dial-text-2);
+}
+.dial-pitch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dial-pitch-row.is-off {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.dial-pitch-row.is-auto .dial-fill {
+  opacity: 0.45;
+}
+.dial-slider-wrap.dial-pitch-slider {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+.dial-reset {
+  margin-block: -2px;
+}
+.dial-reset,
+.dial-pitch-reset {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--dial-text-2);
+  cursor: pointer;
+  transition:
+    transform 160ms ease-out,
+    color 0.18s var(--dial-ease),
+    opacity 0.18s var(--dial-ease);
+}
+.dial-reset:hover,
+.dial-pitch-reset:hover {
+  color: var(--dial-text-1);
+}
+.dial-reset:active,
+.dial-pitch-reset:active {
+  transform: scale(0.9);
+}
+.dial-reset:disabled,
+.dial-pitch-reset:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 .dial-step-val {
   min-width: 3.2ch;

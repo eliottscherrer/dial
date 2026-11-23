@@ -16,7 +16,7 @@ change how fast your music plays, and let the pitch follow or stay put
 
 ## what it does
 
-Dial puts a gauge in the playbar that changes how fast a song plays, anywhere from 0.5x to 1.5x. when a song slows down its pitch drops with it, the way a record does on a turntable, because Spotify's own engine resamples it. it's not a pitch corrected time stretch, so it doesn't have that warbly sound. if you'd rather keep the key you can lock the pitch, which gives you the stretch, the same thing a podcast speed control does
+Dial puts a gauge in the playbar that changes how fast a song plays, anywhere from 0.5x to 1.5x. when a song slows down its pitch drops with it, the way a record does on a turntable, because Spotify's own engine resamples it. it's not a pitch corrected time stretch, so it doesn't have that warbly sound. if you'd rather pick the pitch yourself there's a slider for it, up to 12 semitones either way at any speed, so you can keep the key or pitch a song up or down without touching its speed. that one goes through a time stretch, the same thing a podcast speed control does, so it can sound a bit muffled and i can't do anything about that because it's Spotify's engine doing it
 
 lyrics stay in sync, since what changes is the player's own clock. the seekbar, the time labels and clicking a lyric line all land where they should
 
@@ -33,7 +33,7 @@ a gauge shows up in the playbar, next to the lyrics button
 
 ## usage
 
-click the gauge. the slider goes from 0.5x to 1.5x and sticks to the presets as you drag past them. Slowed, Normal and Sped up are presets you can change, in advanced options you can rename them, give them any rate you want, lock the pitch and pick which timeline the time labels use. Reset always takes you back to exactly 1x
+click the gauge. the slider goes from 0.5x to 1.5x and sticks to the presets as you drag past them. Slowed, Normal and Sped up are presets you can change, in advanced options you can rename them, give them any rate you want, move the pitch and pick which timeline the time labels use. the reset icon at the top always takes you back to exactly 1x
 
 you can also drag the gauge in the playbar itself. it turns between your presets and applies when you let go
 
@@ -55,6 +55,6 @@ Dial doesn't touch Spotify's binaries. it's one JavaScript file that Spicetify l
 
 music on desktop is played by Harmony, Spotify's native engine, so there is no audio element to speed up. what Harmony does do is read two undocumented metadata keys on the tracks it's given, `item.speed` and `audio.pitch_factor`, and Dial attaches them to the queue it hands to `PlayerAPI.play()`. no audio is decrypted or intercepted. to keep the seekbar, the time labels and lyrics right it does wrap a few of the player's own JavaScript methods. that wrapping is the part most likely to break when Spotify changes something
 
-giving both keys the same value is a real resample. leave the pitch key out and Harmony corrects the pitch instead, which is what the lock does
+giving both keys the same value is a real resample. leave the pitch key out and Harmony corrects the pitch instead, which is what the pitch slider does at 0, and any other value is a pitch of its own whatever the speed is
 
 for bug reports, `Dial.support` in the DevTools console tells you which of the two keys your Spotify honors
